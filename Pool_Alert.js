@@ -11,7 +11,16 @@ const protocols = [
         pools: [
             "0x92e802d2a0633cfca251f22016683cfeb096a28f"
         ]
-    }
+    },
+    {
+    name: "Gliquid",
+    positionManager: "0x69D57B9D705eaD73a5d2f2476C30c55bD755cc2F",
+    positionManagerAbi: require("./abis/NonfungiblePositionManager.json"),
+    poolAbi: require("./abis/UniswapV3Pool.json"),
+    pools: [
+        "0xfbb38328df94634da1026cb7734e75e42561db5b"
+    ]
+}
 ];
 
 
@@ -57,18 +66,22 @@ async function getAllPositionsForProtocol(protocol) {
             } catch {
                 pos = null;
             }
-
-            positions.push({
-                tokenId: tokenId.toString(),
-                pools: protocol.pools,
-                token0: pos?.token0 || null,
-                token1: pos?.token1 || null,
-                tickLower: pos?.tickLower?.toString() || null,
-                tickUpper: pos?.tickUpper?.toString() || null,
-                liquidity: pos?.liquidity?.toString() || null
-            });
-        } catch (err) {
-            console.warn(`[${protocol.name}] Erreur avec l'index ${i}: ${err.message}`);
+            
+            if(pos && BigInt(pos.liquidity) > 0n && pos.token0 != '0x0000000000000000000000000000000000000000' && pos.token1 != '0x0000000000000000000000000000000000000000')
+            {
+                positions.push({
+                        tokenId: tokenId.toString(),
+                        pools: protocol.pools,
+                        token0: pos?.token0 || null,
+                        token1: pos?.token1 || null,
+                        tickLower: pos?.tickLower?.toString() || null,
+                        tickUpper: pos?.tickUpper?.toString() || null,
+                        liquidity: pos?.liquidity?.toString() || null
+                    });            
+            }
+        }
+        catch (err) {
+                console.warn(`[${protocol.name}] Erreur avec l'index ${i}: ${err.message}`);
         }
     }
 
@@ -80,9 +93,12 @@ async function monitorAllProtocols() {
         const positions = await getAllPositionsForProtocol(protocol);
 
         for (const pos of positions) {
-            if (BigInt(pos.liquidity) <= 0n) continue;
+
+            console.log(pos);
+ 
 
             for (const poolAddress of pos.pools) {
+
                 try {
                     const poolContract = new ethers.Contract(poolAddress, protocol.poolAbi, provider);
                     const slot0 = await poolContract.slot0();
