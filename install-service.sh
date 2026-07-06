@@ -56,6 +56,8 @@ EOF
 
 # Rotation des logs (evite que service.log gonfle la carte SD).
 # copytruncate : le service garde son descripteur ouvert, pas besoin de le redemarrer.
+# su root root : le fichier service.log est cree par systemd en tant que root (append:),
+#   donc logrotate doit operer en root pour pouvoir le tronquer.
 LOGROTATE=/etc/logrotate.d/poolalert
 echo "Ecriture de $LOGROTATE"
 cat > "$LOGROTATE" <<EOF
@@ -67,7 +69,7 @@ $DIR/service.log {
     missingok
     notifempty
     copytruncate
-    su $RUN_USER $RUN_USER
+    su root root
 }
 EOF
 
