@@ -157,3 +157,5 @@ Il stoppe le service, renvoie les fichiers, met à jour les dépendances et red�
 - **Seuil d'alerte anticipée** : dans `poolalert.env`, décommente `WARN_MARGIN_PCT=0.2`
   (ex. 20 % du range près des bords). Défaut : 0.15 (15 %).
 - **Wallets / pools surveillés** : dans `Pool_Alert.js` (tableau `protocols`).
+- **Logs** : `service.log` est nettoyé automatiquement (rotation quotidienne, 7 jours compressés)
+  via `/etc/logrotate.d/poolalert`, installé par `install-service.sh`.

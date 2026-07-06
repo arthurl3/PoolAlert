@@ -54,6 +54,23 @@ StandardError=append:$DIR/service.log
 WantedBy=multi-user.target
 EOF
 
+# Rotation des logs (evite que service.log gonfle la carte SD).
+# copytruncate : le service garde son descripteur ouvert, pas besoin de le redemarrer.
+LOGROTATE=/etc/logrotate.d/poolalert
+echo "Ecriture de $LOGROTATE"
+cat > "$LOGROTATE" <<EOF
+$DIR/service.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    su $RUN_USER $RUN_USER
+}
+EOF
+
 systemctl daemon-reload
 systemctl enable poolalert.service
 systemctl restart poolalert.service
@@ -61,5 +78,5 @@ systemctl restart poolalert.service
 echo ""
 echo "✅ Service installe et demarre."
 echo "   Statut  :  systemctl status poolalert --no-pager"
-echo "   Logs    :  tail -f $DIR/service.log    (ou  journalctl -u poolalert -f)"
+echo "   Logs    :  tail -f $DIR/service.log    (rotation quotidienne, 7 jours ; ou  journalctl -u poolalert -f)"
 echo "   Stop    :  sudo systemctl stop poolalert"

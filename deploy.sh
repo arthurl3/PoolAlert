@@ -31,7 +31,7 @@ echo "==> [2/4] Transfert des fichiers"
 tar czf - $FILES | ssh "$HOST" "cd '$DEST' && tar xzf -"
 
 echo "==> [3/4] npm install + (re)installation du service"
-ssh "$HOST" "cd '$DEST' && npm install --omit=dev && if systemctl list-unit-files 2>/dev/null | grep -q '^poolalert.service'; then sudo systemctl restart poolalert; else sudo bash install-service.sh; fi"
+ssh "$HOST" "cd '$DEST' && npm install --omit=dev && sudo bash install-service.sh"
 
 echo "==> [4/4] Statut"
 ssh "$HOST" "echo -n 'is-active:  '; systemctl is-active poolalert; echo -n 'is-enabled: '; systemctl is-enabled poolalert; echo '--- derniers logs ---'; tail -n 15 '$DEST/service.log' 2>/dev/null || true"
