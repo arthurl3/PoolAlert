@@ -1,4 +1,14 @@
 {
+  "name": "poolalert",
+  "version": "1.0.0",
+  "description": "Surveillance de positions LP sur Hyperliquid (Ramses / Gliquid / PRJX) avec alertes Telegram et sonores",
+  "main": "Pool_Alert.js",
+  "scripts": {
+    "start": "node Pool_Alert.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "ethers": "^6.15.0",
     "play-sound": "^1.1.6"

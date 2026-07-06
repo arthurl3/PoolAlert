@@ -1,0 +1,2 @@
+# Force les fins de ligne LF sur les scripts shell (sinon le shebang casse sous Linux/Raspberry)
+*.sh text eol=lf

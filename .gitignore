@@ -1,0 +1,10 @@
+# Secrets / config locale (NE PAS committer)
+poolalert.env
+start.ps1
+start.local.*
+.env
+.env.*
+
+# Logs du service
+service.log
+*.log
