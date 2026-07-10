@@ -21,7 +21,7 @@ const providers = RPC_URLS.map(url => new ethers.JsonRpcProvider(url, HYPEREVM, 
 let providerIndex = 0;
 
 // Wallets surveillés
-const WALLET_MAIN = "0x9014C0Aa041d637ed64d022BF237112a6B550532";
+//const WALLET_MAIN = "0x9014C0Aa041d637ed64d022BF237112a6B550532";
 const WALLET_PRJX = "0x570cAeC87aE27b440b79D49512C3a42581dA7e5A";
 
 // Deux familles de PositionManager coexistent sur HyperEVM :
@@ -34,7 +34,7 @@ const protocols = [
         // autre factory et ne détient plus de liquidité : il n'est plus surveillé.
         // Ses pools indexent les positions par tokenId, cf. positionKey().
         name: "Ramses V3",
-        wallets: [WALLET_MAIN, WALLET_PRJX],
+        wallets: [WALLET_PRJX],
         positionManager: "0xB3F77C5134D643483253D22E0Ca24627aE42ED51",
         positionManagerAbi: require("./abis/NonfungiblePositionManager.json"),
         poolAbi: require("./abis/UniswapV3Pool.json"),
