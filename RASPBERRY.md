@@ -1,7 +1,7 @@
 # Installation — PoolAlert sur Raspberry Pi
 
 Installe **PoolAlert**, un script Node.js qui surveille des positions de liquidité (LP)
-sur **Hyperliquid EVM** (Ramses / Gliquid / PRJX) et envoie une **alerte Telegram** (+ son)
+sur **Hyperliquid EVM** (Ramses V3 / PRJX) et envoie une **alerte Telegram** (+ son)
 quand une position sort de son range — ou s'en approche (alerte anticipée réglable).
 Il tourne en continu comme service `systemd` et se relance seul au boot et après un crash.
 
@@ -155,7 +155,10 @@ Il stoppe le service, renvoie les fichiers, met à jour les dépendances et red�
 ## Réglages
 
 - **Seuil d'alerte anticipée** : dans `poolalert.env`, décommente `WARN_MARGIN_PCT=0.2`
-  (ex. 20 % du range près des bords). Défaut : 0.15 (15 %).
+  (ex. 20 % du range près des bords). Défaut : 0.05 (5 %) — soit 3 ticks seulement sur un
+  range de 60 ticks, d'où l'intérêt de monter la valeur.
 - **Wallets / pools surveillés** : dans `Pool_Alert.js` (tableau `protocols`).
+- **RPC** : `RPC_URL` dans `poolalert.env` si le noeud public rate-limite. Chaque cycle ne
+  coûte que 4 `eth_call` (lectures groupées via Multicall3), quel que soit le nombre de NFT.
 - **Logs** : `service.log` est nettoyé automatiquement (rotation quotidienne, 7 jours compressés)
   via `/etc/logrotate.d/poolalert`, installé par `install-service.sh`.

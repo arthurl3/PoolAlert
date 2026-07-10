@@ -1,42 +1,44 @@
 const { ethers } = require("ethers");
 const player = require('play-sound')({});
-const provider = new ethers.JsonRpcProvider("https://rpc.hyperliquid.xyz/evm");
+
+// Le RPC public rate-limite les rafales : RPC_URL permet de basculer sur un autre noeud HyperEVM.
+// staticNetwork évite un eth_chainId accolé à chaque requête (la chaîne ne change jamais).
+const RPC_URL = process.env.RPC_URL || "https://rpc.hyperliquid.xyz/evm";
+const provider = new ethers.JsonRpcProvider(RPC_URL, undefined, { staticNetwork: true });
 
 // Wallets surveillés
 const WALLET_MAIN = "0x9014C0Aa041d637ed64d022BF237112a6B550532";
 const WALLET_PRJX = "0x570cAeC87aE27b440b79D49512C3a42581dA7e5A";
 
+// Deux familles de PositionManager coexistent sur HyperEVM :
+//  - NonfungiblePositionManager.json : positions() expose tickSpacing (Ramses)
+//  - UniswapV3PositionManager.json   : positions() expose fee (Uniswap V3 et ses forks)
+// Utiliser la mauvaise décale le décodage et fait passer les positions pour vides.
 const protocols = [
     {
-        name: "Ramses",
-        wallets: [WALLET_MAIN],
-        positionManager: "0x486EC4dda7fEB9871eEF0d6ccc0D79dD3f7af7a4",
+        // Ramses V3. L'ancien déploiement (PM 0x486EC4dd, pool 0x92e802) reposait sur une
+        // autre factory et ne détient plus de liquidité : il n'est plus surveillé.
+        // Ses pools indexent les positions par tokenId, cf. positionKey().
+        name: "Ramses V3",
+        wallets: [WALLET_MAIN, WALLET_PRJX],
+        positionManager: "0xB3F77C5134D643483253D22E0Ca24627aE42ED51",
         positionManagerAbi: require("./abis/NonfungiblePositionManager.json"),
         poolAbi: require("./abis/UniswapV3Pool.json"),
+        indexedPositions: true,
         pools: [
-            "0x92e802d2a0633cfca251f22016683cfeb096a28f"
+            "0x21092837C89A1858aA7e6631Fcf77a5F12C10218" // UBTC/UETH, tickSpacing 10
         ]
     },
     {
-    name: "Gliquid",
-    wallets: [WALLET_MAIN],
-    positionManager: "0x69D57B9D705eaD73a5d2f2476C30c55bD755cc2F",
-    positionManagerAbi: require("./abis/NonfungiblePositionManager.json"),
-    poolAbi: require("./abis/UniswapV3Pool.json"),
-    pools: [
-        "0xfbb38328df94634da1026cb7734e75e42561db5b"
-    ]
-},
-    {
-    name: "PRJX",
-    wallets: [WALLET_PRJX],
-    positionManager: "0xeaD19AE861c29bBb2101E834922B2FEee69B9091",
-    positionManagerAbi: require("./abis/PrjxPositionManager.json"),
-    poolAbi: require("./abis/UniswapV3Pool.json"),
-    pools: [
-        "0x467364bd2a633208b4534f5b7ec11d24604546e4" // KHYPE/UBTC 0.3%
-    ]
-}
+        name: "PRJX",
+        wallets: [WALLET_PRJX],
+        positionManager: "0xeaD19AE861c29bBb2101E834922B2FEee69B9091",
+        positionManagerAbi: require("./abis/UniswapV3PositionManager.json"),
+        poolAbi: require("./abis/UniswapV3Pool.json"),
+        pools: [
+            "0x467364bd2a633208b4534f5b7ec11d24604546e4" // KHYPE/UBTC 0.3%
+        ]
+    }
 ];
 
 
@@ -125,108 +127,292 @@ function classifyPosition(currentTick, tickLower, tickUpper) {
 const positionStates = {};
 
 
-async function getAllPositionsForProtocol(protocol) {
-    const positionManager = new ethers.Contract(protocol.positionManager, protocol.positionManagerAbi, provider);
+// === Lecture on-chain groupée ===
+// Un PositionManager ERC-721 n'expose que balanceOf / tokenOfOwnerByIndex(i) / positions(id) :
+// lire N positions demande 1 + 2N lectures, et chaque étage dépend du précédent. Multicall3
+// agrège chaque étage en un seul eth_call -> ~4 requêtes par cycle quel que soit le nombre de NFT.
+const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11";
+const multicall = new ethers.Contract(MULTICALL3, [
+    "function aggregate3((address target, bool allowFailure, bytes callData)[] calls) payable returns ((bool success, bytes returnData)[] returnData)"
+], provider);
 
-    const positions = [];
+// Un eth_call agrégé reste borné : au-delà, on découpe pour ne pas cogner la limite de gas.
+const MAX_CALLS_PER_BATCH = 150;
 
-    for (const userAddress of protocol.wallets) {
-        let balance;
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Le RPC public rate-limite les rafales : on réessaie avant d'abandonner le cycle.
+async function withRetry(fn, label) {
+    let lastErr;
+    for (let attempt = 0; attempt < 3; attempt++) {
         try {
-            balance = await positionManager.balanceOf(userAddress);
+            return await fn();
         } catch (err) {
-            console.warn(`[${protocol.name}] balanceOf a échoué pour ${userAddress}: ${err.message}`);
-            continue;
-        }
-
-        for (let i = 0; i < balance; i++) {
-            try {
-                const tokenId = await positionManager.tokenOfOwnerByIndex(userAddress, i);
-                let pos;
-                try {
-                    pos = await positionManager.positions(tokenId);
-                } catch {
-                    pos = null;
-                }
-
-                if(pos && BigInt(pos.liquidity) > 0n && pos.token0 != '0x0000000000000000000000000000000000000000' && pos.token1 != '0x0000000000000000000000000000000000000000')
-                {
-                    positions.push({
-                            wallet: userAddress,
-                            tokenId: tokenId.toString(),
-                            pools: protocol.pools,
-                            token0: pos?.token0 || null,
-                            token1: pos?.token1 || null,
-                            tickLower: pos?.tickLower?.toString() || null,
-                            tickUpper: pos?.tickUpper?.toString() || null,
-                            liquidity: pos?.liquidity?.toString() || null
-                        });
-                }
-            }
-            catch (err) {
-                    console.warn(`[${protocol.name}] Erreur avec l'index ${i} (${userAddress}): ${err.message}`);
-            }
+            lastErr = err;
+            if (attempt < 2) await sleep(400 * Math.pow(3, attempt));
         }
     }
+    throw new Error(`${label}: ${lastErr.message}`);
+}
 
+const ifaceCache = new Map();
+function ifaceFor(abi) {
+    let iface = ifaceCache.get(abi);
+    if (!iface) {
+        iface = new ethers.Interface(abi);
+        ifaceCache.set(abi, iface);
+    }
+    return iface;
+}
+
+// Exécute toutes les lectures en un minimum d'eth_call. Le résultat est aligné sur `calls`,
+// avec null pour toute lecture ayant échoué (allowFailure : un revert n'annule pas les autres).
+async function aggregate(calls) {
+    const decoded = [];
+    for (let start = 0; start < calls.length; start += MAX_CALLS_PER_BATCH) {
+        const chunk = calls.slice(start, start + MAX_CALLS_PER_BATCH);
+        const encoded = chunk.map(call => ({
+            target: call.target,
+            allowFailure: true,
+            callData: call.iface.encodeFunctionData(call.fn, call.args)
+        }));
+
+        const results = await withRetry(
+            () => multicall.aggregate3.staticCall(encoded),
+            `multicall (${chunk.length} lectures)`
+        );
+
+        results.forEach((result, i) => {
+            if (!result.success) return decoded.push(null);
+            try {
+                decoded.push(chunk[i].iface.decodeFunctionResult(chunk[i].fn, result.returnData));
+            } catch {
+                decoded.push(null);
+            }
+        });
+    }
+    return decoded;
+}
+
+// tickSpacing n'existe que sur les positions Ramses ; l'ABI Uniswap V3 expose fee à la place.
+function optionalTickSpacing(pos) {
+    try {
+        return pos.tickSpacing === undefined ? null : Number(pos.tickSpacing);
+    } catch {
+        return null;
+    }
+}
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+// Lit toutes les positions ouvertes de tous les wallets, en 3 vagues de lectures groupées.
+async function collectAllPositions() {
+    // Vague 1 : combien de NFT détient chaque wallet ?
+    const balanceCalls = protocols.flatMap(protocol =>
+        protocol.wallets.map(wallet => ({
+            protocol,
+            wallet,
+            target: protocol.positionManager,
+            iface: ifaceFor(protocol.positionManagerAbi),
+            fn: "balanceOf",
+            args: [wallet]
+        })));
+    const balances = await aggregate(balanceCalls);
+
+    // Vague 2 : le tokenId de chacun de ces NFT.
+    const tokenIdCalls = [];
+    balanceCalls.forEach((call, i) => {
+        const balance = balances[i] ? Number(balances[i][0]) : 0;
+        for (let index = 0; index < balance; index++) {
+            tokenIdCalls.push({ ...call, fn: "tokenOfOwnerByIndex", args: [call.wallet, index] });
+        }
+    });
+    const tokenIds = await aggregate(tokenIdCalls);
+
+    // Vague 3 : le détail de chaque position.
+    const positionCalls = [];
+    tokenIdCalls.forEach((call, i) => {
+        if (!tokenIds[i]) return;
+        positionCalls.push({ ...call, tokenId: tokenIds[i][0], fn: "positions", args: [tokenIds[i][0]] });
+    });
+    const rawPositions = await aggregate(positionCalls);
+
+    const positions = [];
+    positionCalls.forEach((call, i) => {
+        const pos = rawPositions[i];
+        if (!pos) return;
+        // Une position refermée garde son NFT mais n'a plus de liquidité.
+        if (BigInt(pos.liquidity) === 0n) return;
+        if (pos.token0 === ZERO_ADDRESS || pos.token1 === ZERO_ADDRESS) return;
+
+        positions.push({
+            protocol: call.protocol,
+            wallet: call.wallet,
+            tokenId: call.tokenId,
+            token0: pos.token0.toLowerCase(),
+            token1: pos.token1.toLowerCase(),
+            tickSpacing: optionalTickSpacing(pos),
+            tickLower: Number(pos.tickLower),
+            tickUpper: Number(pos.tickUpper),
+            liquidity: pos.liquidity
+        });
+    });
     return positions;
 }
 
-async function monitorAllProtocols() {
-    let anyOutOfRange = false;
+// Clé d'une position dans sa pool. Ramses V3 y intègre le tokenId (deux NFT peuvent
+// partager un range) ; Uniswap V3 agrège au contraire les mêmes bornes sous une clé unique.
+function positionKey(protocol, pos) {
+    return protocol.indexedPositions
+        ? ethers.solidityPackedKeccak256(
+            ["address", "uint256", "int24", "int24"],
+            [protocol.positionManager, pos.tokenId, pos.tickLower, pos.tickUpper])
+        : ethers.solidityPackedKeccak256(
+            ["address", "int24", "int24"],
+            [protocol.positionManager, pos.tickLower, pos.tickUpper]);
+}
 
-    for (const protocol of protocols) {
-        const positions = await getAllPositionsForProtocol(protocol);
+// Métadonnées des pools : immuables, donc lues une seule fois.
+const poolMetaCache = new Map();
 
-        for (const pos of positions) {
+async function loadPoolMetas() {
+    const missing = protocols.flatMap(protocol =>
+        protocol.pools
+            .filter(address => !poolMetaCache.has(address))
+            .map(address => ({ protocol, address })));
+    if (missing.length === 0) return;
 
+    const calls = missing.flatMap(({ protocol, address }) => {
+        const iface = ifaceFor(protocol.poolAbi);
+        return ["token0", "token1", "tickSpacing"].map(fn => ({ target: address, iface, fn, args: [] }));
+    });
+    const results = await aggregate(calls);
 
-            for (const poolAddress of pos.pools) {
+    missing.forEach(({ protocol, address }, i) => {
+        const [token0, token1, tickSpacing] = results.slice(i * 3, i * 3 + 3);
+        if (!token0 || !token1) {
+            // Pas de mise en cache : un échec RPC est transitoire, le figer condamnerait la pool.
+            console.warn(`[${protocol.name}] Métadonnées illisibles pour le pool ${address}`);
+            return;
+        }
+        poolMetaCache.set(address, {
+            address,
+            iface: ifaceFor(protocol.poolAbi),
+            contract: new ethers.Contract(address, protocol.poolAbi, provider),
+            token0: token0[0].toLowerCase(),
+            token1: token1[0].toLowerCase(),
+            // tickSpacing ne sert qu'à départager deux pools de même paire, et toutes les
+            // forks ne l'exposent pas : son absence ne doit pas écarter la pool.
+            tickSpacing: tickSpacing ? Number(tickSpacing[0]) : null
+        });
+    });
+}
 
-                try {
-                    const poolContract = new ethers.Contract(poolAddress, protocol.poolAbi, provider);
-                    const slot0 = await poolContract.slot0();
-                    const currentTick = Number(slot0.tick);
+// Retrouve la pool qui porte réellement cette position. Sans ça, une position serait
+// comparée au tick de toutes les pools du protocole -> alertes fantômes.
+async function resolvePoolForPosition(protocol, pos) {
+    const metas = protocol.pools.map(address => poolMetaCache.get(address)).filter(Boolean);
 
-                    const state = classifyPosition(currentTick, pos.tickLower, pos.tickUpper);
-                    const key = `${protocol.name}-${pos.tokenId}`;
-                    const prev = positionStates[key];
+    let candidates = metas.filter(m => m.token0 === pos.token0 && m.token1 === pos.token1);
+    if (candidates.length > 1 && pos.tickSpacing !== null) {
+        const bySpacing = candidates.filter(m => m.tickSpacing === pos.tickSpacing);
+        if (bySpacing.length > 0) candidates = bySpacing;
+    }
+    if (candidates.length <= 1) return candidates[0] || null;
 
-                    const label = `[${protocol.name}] Wallet ${pos.wallet} - Position ${pos.tokenId}`;
-                    const range = `range [${pos.tickLower}, ${pos.tickUpper}], tick actuel ${currentTick}`;
-
-                    if (state === 'out') {
-                        anyOutOfRange = true;
-                        console.log(`⚠️ ${label} HORS RANGE (${range})`);
-                    } else if (state === 'warn') {
-                        console.log(`🟠 ${label} PROCHE DU BORD (${range})`);
-                    } else {
-                        console.log(`✅ ${label} in range (${range})`);
-                    }
-
-                    // Telegram : uniquement au changement d'état (évite le spam toutes les 30s)
-                    if (state !== prev) {
-                        if (state === 'out') {
-                            await sendTelegram(`⚠️ <b>HORS RANGE</b>\n${label}\n${range}`);
-                        } else if (state === 'warn') {
-                            await sendTelegram(`🟠 <b>Bientôt hors range</b>\n${label}\n${range}`);
-                        } else if (state === 'in' && NOTIFY_BACK_IN_RANGE && (prev === 'out' || prev === 'warn')) {
-                            await sendTelegram(`✅ <b>De nouveau in range</b>\n${label}\n${range}`);
-                        }
-                    }
-
-                    positionStates[key] = state;
-                } catch (err) {
-                    console.warn(`Impossible de récupérer le tick pour le pool ${poolAddress}: ${err.message}`);
-                }
-            }
+    // Même paire et même tickSpacing : on demande à chaque pool si elle porte la position.
+    // Le fee ne peut pas servir de discriminant, il est dynamique sur Ramses V3.
+    const key = positionKey(protocol, pos);
+    for (const meta of candidates) {
+        try {
+            const { liquidity } = await meta.contract.positions(key);
+            if (BigInt(liquidity) > 0n) return meta;
+        } catch (err) {
+            console.warn(`[${protocol.name}] positions() a échoué sur ${meta.address}: ${err.message}`);
         }
     }
+    return null;
+}
 
-    // Son : une seule décision par cycle (corrige le flip-flop quand plusieurs positions sont surveillées)
+async function monitorAllProtocols() {
+    let positions;
+    try {
+        await loadPoolMetas();
+        positions = await collectAllPositions();
+    } catch (err) {
+        // Rien n'a pu être lu : on ne sait pas où on en est, donc on ne coupe pas l'alarme.
+        console.warn(`Cycle ignoré (RPC injoignable) : ${err.message}`);
+        return;
+    }
+
+    const monitored = [];
+    for (const pos of positions) {
+        const pool = await resolvePoolForPosition(pos.protocol, pos);
+        if (pool) monitored.push({ pos, pool });
+    }
+
+    // Vague 4 : le tick courant de chaque pool concernée.
+    const pools = [...new Map(monitored.map(m => [m.pool.address, m.pool])).values()];
+    let slot0s;
+    try {
+        slot0s = await aggregate(pools.map(p => ({ target: p.address, iface: p.iface, fn: "slot0", args: [] })));
+    } catch (err) {
+        console.warn(`Cycle ignoré (slot0 illisible) : ${err.message}`);
+        return;
+    }
+
+    const tickByPool = new Map();
+    pools.forEach((pool, i) => {
+        if (slot0s[i]) tickByPool.set(pool.address, Number(slot0s[i].tick));
+    });
+
+    let anyOutOfRange = false;
+    let incomplete = false;
+
+    for (const { pos, pool } of monitored) {
+        const currentTick = tickByPool.get(pool.address);
+        if (currentTick === undefined) {
+            // Tick inconnu : cette position n'est pas évaluée, le cycle est partiel.
+            incomplete = true;
+            continue;
+        }
+
+        const state = classifyPosition(currentTick, pos.tickLower, pos.tickUpper);
+        const key = `${pos.protocol.name}-${pos.tokenId}`;
+        const prev = positionStates[key];
+
+        const label = `[${pos.protocol.name}] Wallet ${pos.wallet} - Position ${pos.tokenId}`;
+        const range = `range [${pos.tickLower}, ${pos.tickUpper}], tick actuel ${currentTick}`;
+
+        if (state === 'out') {
+            anyOutOfRange = true;
+            console.log(`⚠️ ${label} HORS RANGE (${range})`);
+        } else if (state === 'warn') {
+            console.log(`🟠 ${label} PROCHE DU BORD (${range})`);
+        } else {
+            console.log(`✅ ${label} in range (${range})`);
+        }
+
+        // Telegram : uniquement au changement d'état (évite le spam toutes les 30s)
+        if (state !== prev) {
+            if (state === 'out') {
+                await sendTelegram(`⚠️ <b>HORS RANGE</b>\n${label}\n${range}`);
+            } else if (state === 'warn') {
+                await sendTelegram(`🟠 <b>Bientôt hors range</b>\n${label}\n${range}`);
+            } else if (state === 'in' && NOTIFY_BACK_IN_RANGE && (prev === 'out' || prev === 'warn')) {
+                await sendTelegram(`✅ <b>De nouveau in range</b>\n${label}\n${range}`);
+            }
+        }
+
+        positionStates[key] = state;
+    }
+
+    // Son : une seule décision par cycle (corrige le flip-flop quand plusieurs positions sont
+    // surveillées). Un cycle partiel ne coupe jamais une alarme en cours : tant qu'on n'a pas
+    // relu toutes les positions, on ne peut pas affirmer qu'aucune n'est hors range.
     if (anyOutOfRange) {
         startAlarm();
-    } else {
+    } else if (!incomplete) {
         stopAlarm();
     }
 }
