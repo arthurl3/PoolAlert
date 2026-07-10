@@ -58,6 +58,13 @@ const protocols = [
 
 let audioProcess = null;
 let alarmActive = false;
+let alarmWake = null;
+
+// Silence entre deux passages du son, une fois celui-ci terminé. alarm.wav dure ~4 s :
+// le rejouer toutes les 5 s revenait à un vacarme continu. Réglable via ALARM_INTERVAL_MS.
+const ALARM_INTERVAL_MS = process.env.ALARM_INTERVAL_MS !== undefined
+    ? Number(process.env.ALARM_INTERVAL_MS)
+    : 60 * 1000;
 
 // Démarre l'alarme sonore en boucle (idempotent : plusieurs appels ne cumulent pas)
 function startAlarm() {
@@ -68,11 +75,35 @@ function startAlarm() {
 
 async function loopAlarm() {
     while (alarmActive) {
+        await playAlarmOnce();
+        if (!alarmActive) break;
+        await alarmPause(ALARM_INTERVAL_MS);
+    }
+}
+
+// Attendre la fin du son avant de le reprogrammer : sinon les lectures se chevauchent et
+// stopAlarm ne peut tuer que la dernière.
+function playAlarmOnce() {
+    return new Promise(resolve => {
         audioProcess = player.play('./alarm.wav', (err) => {
             if (err && !err.killed) console.error(err);
+            audioProcess = null;
+            resolve();
         });
-        await new Promise(resolve => setTimeout(resolve, 5000));
-    }
+    });
+}
+
+// Pause interruptible : un retour in range coupe l'attente au lieu de la laisser expirer.
+function alarmPause(ms) {
+    return new Promise(resolve => {
+        const timer = setTimeout(finish, ms);
+        alarmWake = finish;
+        function finish() {
+            clearTimeout(timer);
+            alarmWake = null;
+            resolve();
+        }
+    });
 }
 
 // Stoppe l'alarme sonore
@@ -82,6 +113,7 @@ function stopAlarm() {
         audioProcess.kill();
         audioProcess = null;
     }
+    if (alarmWake) alarmWake();
 }
 
 // === Réglages des alertes ===
