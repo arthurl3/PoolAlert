@@ -2,9 +2,11 @@ const { ethers } = require("ethers");
 const player = require('play-sound')({});
 
 // Le RPC public rate-limite les rafales : RPC_URL permet de basculer sur un autre noeud HyperEVM.
-// staticNetwork évite un eth_chainId accolé à chaque requête (la chaîne ne change jamais).
+// Le réseau est déclaré en dur : sans ça ethers émet un eth_chainId à chaque requête, et
+// refuse même de démarrer tant que la détection est rate-limitée.
 const RPC_URL = process.env.RPC_URL || "https://rpc.hyperliquid.xyz/evm";
-const provider = new ethers.JsonRpcProvider(RPC_URL, undefined, { staticNetwork: true });
+const HYPEREVM = ethers.Network.from(999);
+const provider = new ethers.JsonRpcProvider(RPC_URL, HYPEREVM, { staticNetwork: HYPEREVM });
 
 // Wallets surveillés
 const WALLET_MAIN = "0x9014C0Aa041d637ed64d022BF237112a6B550532";
