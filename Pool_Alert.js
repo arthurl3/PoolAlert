@@ -1,12 +1,24 @@
 const { ethers } = require("ethers");
 const player = require('play-sound')({});
 
-// Le RPC public rate-limite les rafales : RPC_URL permet de basculer sur un autre noeud HyperEVM.
+// Noeuds HyperEVM essayés dans l'ordre. Le RPC officiel rate-limite durablement une IP qui a
+// trop tapé — et répond alors "rate limited" même à un eth_chainId : sans secours, la
+// surveillance s'arrête sans que rien ne sorte du range. RPC_URL surcharge la liste.
+const DEFAULT_RPC_URLS = [
+    "https://rpc.hyperliquid.xyz/evm",
+    "https://rpc.purroofgroup.com",
+    "https://hyperliquid.drpc.org"
+];
+const RPC_URLS = (process.env.RPC_URL || DEFAULT_RPC_URLS.join(","))
+    .split(",")
+    .map(url => url.trim())
+    .filter(Boolean);
+
 // Le réseau est déclaré en dur : sans ça ethers émet un eth_chainId à chaque requête, et
 // refuse même de démarrer tant que la détection est rate-limitée.
-const RPC_URL = process.env.RPC_URL || "https://rpc.hyperliquid.xyz/evm";
 const HYPEREVM = ethers.Network.from(999);
-const provider = new ethers.JsonRpcProvider(RPC_URL, HYPEREVM, { staticNetwork: HYPEREVM });
+const providers = RPC_URLS.map(url => new ethers.JsonRpcProvider(url, HYPEREVM, { staticNetwork: HYPEREVM }));
+let providerIndex = 0;
 
 // Wallets surveillés
 const WALLET_MAIN = "0x9014C0Aa041d637ed64d022BF237112a6B550532";
@@ -134,27 +146,33 @@ const positionStates = {};
 // lire N positions demande 1 + 2N lectures, et chaque étage dépend du précédent. Multicall3
 // agrège chaque étage en un seul eth_call -> ~4 requêtes par cycle quel que soit le nombre de NFT.
 const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11";
-const multicall = new ethers.Contract(MULTICALL3, [
+const multicallIface = new ethers.Interface([
     "function aggregate3((address target, bool allowFailure, bytes callData)[] calls) payable returns ((bool success, bytes returnData)[] returnData)"
-], provider);
+]);
 
 // Un eth_call agrégé reste borné : au-delà, on découpe pour ne pas cogner la limite de gas.
 const MAX_CALLS_PER_BATCH = 150;
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Le RPC public rate-limite les rafales : on réessaie avant d'abandonner le cycle.
-async function withRetry(fn, label) {
+// Une lecture on-chain, en basculant de noeud tant qu'il en reste un qui répond. Le noeud
+// retenu est conservé pour les appels suivants : inutile de retomber sur celui qui rate-limite.
+async function rpcCall(tx) {
     let lastErr;
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < providers.length * 2; attempt++) {
+        const current = providerIndex;
         try {
-            return await fn();
+            return await providers[current].call(tx);
         } catch (err) {
             lastErr = err;
-            if (attempt < 2) await sleep(400 * Math.pow(3, attempt));
+            providerIndex = (current + 1) % providers.length;
+            if (providers.length > 1) {
+                console.warn(`RPC ${RPC_URLS[current]} indisponible -> bascule sur ${RPC_URLS[providerIndex]}`);
+            }
+            await sleep(300 * (attempt + 1));
         }
     }
-    throw new Error(`${label}: ${lastErr.message}`);
+    throw new Error(`aucun RPC ne répond (${lastErr.message})`);
 }
 
 const ifaceCache = new Map();
@@ -179,10 +197,11 @@ async function aggregate(calls) {
             callData: call.iface.encodeFunctionData(call.fn, call.args)
         }));
 
-        const results = await withRetry(
-            () => multicall.aggregate3.staticCall(encoded),
-            `multicall (${chunk.length} lectures)`
-        );
+        const raw = await rpcCall({
+            to: MULTICALL3,
+            data: multicallIface.encodeFunctionData("aggregate3", [encoded])
+        });
+        const [results] = multicallIface.decodeFunctionResult("aggregate3", raw);
 
         results.forEach((result, i) => {
             if (!result.success) return decoded.push(null);
@@ -300,7 +319,6 @@ async function loadPoolMetas() {
         poolMetaCache.set(address, {
             address,
             iface: ifaceFor(protocol.poolAbi),
-            contract: new ethers.Contract(address, protocol.poolAbi, provider),
             token0: token0[0].toLowerCase(),
             token1: token1[0].toLowerCase(),
             // tickSpacing ne sert qu'à départager deux pools de même paire, et toutes les
@@ -327,7 +345,8 @@ async function resolvePoolForPosition(protocol, pos) {
     const key = positionKey(protocol, pos);
     for (const meta of candidates) {
         try {
-            const { liquidity } = await meta.contract.positions(key);
+            const raw = await rpcCall({ to: meta.address, data: meta.iface.encodeFunctionData("positions", [key]) });
+            const [liquidity] = meta.iface.decodeFunctionResult("positions", raw);
             if (BigInt(liquidity) > 0n) return meta;
         } catch (err) {
             console.warn(`[${protocol.name}] positions() a échoué sur ${meta.address}: ${err.message}`);
