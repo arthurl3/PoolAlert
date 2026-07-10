@@ -1,5 +1,11 @@
 const { ethers } = require("ethers");
-const player = require('play-sound')({});
+
+// play-sound retient le premier lecteur trouvé dans sa liste, où mpg123 précède aplay : sur le
+// Raspberry il prend alarm.wav (un WAV 24 bits) pour un flux MPEG et ne rend jamais la main.
+// aplay lit le WAV nativement -> on le place en tête. AUDIO_PLAYER force un lecteur précis.
+const AUDIO_PLAYERS = ["aplay", "mplayer", "ffplay", "cvlc", "powershell"];
+const player = require('play-sound')(
+    process.env.AUDIO_PLAYER ? { player: process.env.AUDIO_PLAYER } : { players: AUDIO_PLAYERS });
 
 // Noeuds HyperEVM essayés dans l'ordre. Le RPC officiel rate-limite durablement une IP qui a
 // trop tapé — et répond alors "rate limited" même à un eth_chainId : sans secours, la
@@ -82,14 +88,35 @@ async function loopAlarm() {
 }
 
 // Attendre la fin du son avant de le reprogrammer : sinon les lectures se chevauchent et
-// stopAlarm ne peut tuer que la dernière.
+// stopAlarm ne peut tuer que la dernière. Le garde-fou couvre le lecteur qui ne se termine
+// jamais : sans lui, la boucle resterait bloquée ici et l'alarme ne sonnerait plus qu'une fois.
+const ALARM_MAX_PLAY_MS = 15000;
+
 function playAlarmOnce() {
     return new Promise(resolve => {
-        audioProcess = player.play('./alarm.wav', (err) => {
-            if (err && !err.killed) console.error(err);
+        let settled = false;
+        let guard = null;
+        const done = () => {
+            if (settled) return;
+            settled = true;
+            if (guard) clearTimeout(guard);
             audioProcess = null;
             resolve();
+        };
+
+        const proc = player.play('./alarm.wav', (err) => {
+            // play-sound remonte le code de sortie, pas une Error : err.message peut être absent.
+            if (err && !err.killed) console.warn(`Lecture de alarm.wav impossible (${err.message || err})`);
+            done();
         });
+
+        if (settled) return; // aucun lecteur installé : le callback a déjà tout résolu
+        audioProcess = proc;
+        guard = setTimeout(() => {
+            console.warn(`Lecteur audio bloqué (> ${ALARM_MAX_PLAY_MS} ms) — arrêt forcé.`);
+            if (proc) proc.kill();
+            done();
+        }, ALARM_MAX_PLAY_MS);
     });
 }
 
