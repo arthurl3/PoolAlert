@@ -155,6 +155,21 @@ const MAX_CALLS_PER_BATCH = 150;
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
+// Les erreurs ethers embarquent tout le payload (calldata compris) : illisible dans un log.
+const briefly = (err) => (err.shortMessage || err.message || String(err)).split("\n")[0].slice(0, 120);
+
+// Un noeud qui accepte la connexion sans jamais répondre bloquerait le cycle 5 minutes
+// (timeout ethers par défaut), pendant que setInterval en empile d'autres derrière.
+const RPC_TIMEOUT_MS = 10000;
+
+function withTimeout(promise, ms, label) {
+    let timer;
+    const expiry = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} : aucune réponse en ${ms} ms`)), ms);
+    });
+    return Promise.race([promise, expiry]).finally(() => clearTimeout(timer));
+}
+
 // Une lecture on-chain, en basculant de noeud tant qu'il en reste un qui répond. Le noeud
 // retenu est conservé pour les appels suivants : inutile de retomber sur celui qui rate-limite.
 async function rpcCall(tx) {
@@ -162,17 +177,17 @@ async function rpcCall(tx) {
     for (let attempt = 0; attempt < providers.length * 2; attempt++) {
         const current = providerIndex;
         try {
-            return await providers[current].call(tx);
+            return await withTimeout(providers[current].call(tx), RPC_TIMEOUT_MS, RPC_URLS[current]);
         } catch (err) {
             lastErr = err;
             providerIndex = (current + 1) % providers.length;
             if (providers.length > 1) {
-                console.warn(`RPC ${RPC_URLS[current]} indisponible -> bascule sur ${RPC_URLS[providerIndex]}`);
+                console.warn(`RPC ${RPC_URLS[current]} indisponible (${briefly(err)}) -> bascule sur ${RPC_URLS[providerIndex]}`);
             }
             await sleep(300 * (attempt + 1));
         }
     }
-    throw new Error(`aucun RPC ne répond (${lastErr.message})`);
+    throw new Error(`aucun RPC ne répond (${briefly(lastErr)})`);
 }
 
 const ifaceCache = new Map();
@@ -349,20 +364,37 @@ async function resolvePoolForPosition(protocol, pos) {
             const [liquidity] = meta.iface.decodeFunctionResult("positions", raw);
             if (BigInt(liquidity) > 0n) return meta;
         } catch (err) {
-            console.warn(`[${protocol.name}] positions() a échoué sur ${meta.address}: ${err.message}`);
+            console.warn(`[${protocol.name}] positions() a échoué sur ${meta.address}: ${briefly(err)}`);
         }
     }
     return null;
 }
 
+// Un cycle lent ne doit pas se faire doubler par le suivant : les deux liraient la chaîne en
+// parallèle et écraseraient positionStates dans le désordre.
+let cycleRunning = false;
+
 async function monitorAllProtocols() {
+    if (cycleRunning) {
+        console.warn("Cycle précédent encore en cours, celui-ci est sauté.");
+        return;
+    }
+    cycleRunning = true;
+    try {
+        await runCycle();
+    } finally {
+        cycleRunning = false;
+    }
+}
+
+async function runCycle() {
     let positions;
     try {
         await loadPoolMetas();
         positions = await collectAllPositions();
     } catch (err) {
         // Rien n'a pu être lu : on ne sait pas où on en est, donc on ne coupe pas l'alarme.
-        console.warn(`Cycle ignoré (RPC injoignable) : ${err.message}`);
+        console.warn(`Cycle ignoré (RPC injoignable) : ${briefly(err)}`);
         return;
     }
 
@@ -378,7 +410,7 @@ async function monitorAllProtocols() {
     try {
         slot0s = await aggregate(pools.map(p => ({ target: p.address, iface: p.iface, fn: "slot0", args: [] })));
     } catch (err) {
-        console.warn(`Cycle ignoré (slot0 illisible) : ${err.message}`);
+        console.warn(`Cycle ignoré (slot0 illisible) : ${briefly(err)}`);
         return;
     }
 
