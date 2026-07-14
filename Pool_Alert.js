@@ -29,6 +29,7 @@ let providerIndex = 0;
 // Wallets surveillés
 //const WALLET_MAIN = "0x9014C0Aa041d637ed64d022BF237112a6B550532";
 const WALLET_PRJX = "0x570cAeC87aE27b440b79D49512C3a42581dA7e5A";
+const WALLET_C5E0 = "0xC5E0bBFb5A0bAE8c4aF604E31F32729F63c20129";
 
 // Deux familles de PositionManager coexistent sur HyperEVM :
 //  - NonfungiblePositionManager.json : positions() expose tickSpacing (Ramses)
@@ -40,7 +41,7 @@ const protocols = [
         // autre factory et ne détient plus de liquidité : il n'est plus surveillé.
         // Ses pools indexent les positions par tokenId, cf. positionKey().
         name: "Ramses V3",
-        wallets: [WALLET_PRJX],
+        wallets: [WALLET_PRJX, WALLET_C5E0],
         positionManager: "0xB3F77C5134D643483253D22E0Ca24627aE42ED51",
         positionManagerAbi: require("./abis/NonfungiblePositionManager.json"),
         poolAbi: require("./abis/UniswapV3Pool.json"),
@@ -51,7 +52,7 @@ const protocols = [
     },
     {
         name: "PRJX",
-        wallets: [WALLET_PRJX],
+        wallets: [WALLET_PRJX, WALLET_C5E0],
         positionManager: "0xeaD19AE861c29bBb2101E834922B2FEee69B9091",
         positionManagerAbi: require("./abis/UniswapV3PositionManager.json"),
         poolAbi: require("./abis/UniswapV3Pool.json"),
@@ -160,18 +161,38 @@ const NOTIFY_BACK_IN_RANGE = true;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const TELEGRAM_CHAT_ID   = process.env.TELEGRAM_CHAT_ID   || "";
 
+// Deuxième compte Telegram, dédié aux positions de WALLET_C5E0. Il peut réutiliser le
+// même bot (on ne change alors que le chat) ou pointer un bot séparé via TELEGRAM_BOT_TOKEN_2.
+const TELEGRAM_BOT_TOKEN_2 = process.env.TELEGRAM_BOT_TOKEN_2 || TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID_2   = process.env.TELEGRAM_CHAT_ID_2   || "";
+
+// Destinations Telegram nommées : { token, chatId }.
+const TELEGRAM_DEFAULT = { token: TELEGRAM_BOT_TOKEN,   chatId: TELEGRAM_CHAT_ID };
+const TELEGRAM_C5E0    = { token: TELEGRAM_BOT_TOKEN_2, chatId: TELEGRAM_CHAT_ID_2 };
+
+// Route les alertes d'un wallet vers son compte Telegram (défaut = compte principal).
+const walletTelegram = {
+    [WALLET_C5E0.toLowerCase()]: TELEGRAM_C5E0
+};
+function telegramFor(wallet) {
+    return walletTelegram[wallet.toLowerCase()] || TELEGRAM_DEFAULT;
+}
+
 if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) {
     console.warn("⚠️ Telegram non configuré (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID) — alertes Telegram désactivées, le son reste actif.");
 }
+if (!TELEGRAM_C5E0.token || !TELEGRAM_C5E0.chatId) {
+    console.warn(`ℹ️ Compte Telegram secondaire non configuré (TELEGRAM_CHAT_ID_2) — les alertes de ${WALLET_C5E0} ne partiront pas par Telegram (le son reste actif).`);
+}
 
-async function sendTelegram(text) {
-    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+async function sendTelegram(text, dest = TELEGRAM_DEFAULT) {
+    if (!dest.token || !dest.chatId) return;
     try {
-        const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        const res = await fetch(`https://api.telegram.org/bot${dest.token}/sendMessage`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                chat_id: TELEGRAM_CHAT_ID,
+                chat_id: dest.chatId,
                 text,
                 parse_mode: "HTML",
                 disable_web_page_preview: true
@@ -505,14 +526,16 @@ async function runCycle() {
             console.log(`✅ ${label} in range (${range})`);
         }
 
-        // Telegram : uniquement au changement d'état (évite le spam toutes les 30s)
+        // Telegram : uniquement au changement d'état (évite le spam toutes les 30s),
+        // routé vers le compte associé au wallet de la position.
         if (state !== prev) {
+            const tg = telegramFor(pos.wallet);
             if (state === 'out') {
-                await sendTelegram(`⚠️ <b>HORS RANGE</b>\n${label}\n${range}`);
+                await sendTelegram(`⚠️ <b>HORS RANGE</b>\n${label}\n${range}`, tg);
             } else if (state === 'warn') {
-                await sendTelegram(`🟠 <b>Bientôt hors range</b>\n${label}\n${range}`);
+                await sendTelegram(`🟠 <b>Bientôt hors range</b>\n${label}\n${range}`, tg);
             } else if (state === 'in' && NOTIFY_BACK_IN_RANGE && (prev === 'out' || prev === 'warn')) {
-                await sendTelegram(`✅ <b>De nouveau in range</b>\n${label}\n${range}`);
+                await sendTelegram(`✅ <b>De nouveau in range</b>\n${label}\n${range}`, tg);
             }
         }
 
@@ -530,7 +553,12 @@ async function runCycle() {
 }
 
 
-sendTelegram("🟢 PoolAlert démarré — surveillance des positions en cours.").catch(() => {});
+// Ping de démarrage sur chaque compte Telegram distinct configuré.
+for (const dest of [TELEGRAM_DEFAULT, TELEGRAM_C5E0]) {
+    if (!dest.token || !dest.chatId) continue;
+    if (dest !== TELEGRAM_DEFAULT && dest.token === TELEGRAM_DEFAULT.token && dest.chatId === TELEGRAM_DEFAULT.chatId) continue;
+    sendTelegram("🟢 PoolAlert démarré — surveillance des positions en cours.", dest).catch(() => {});
+}
 monitorAllProtocols();
 
 // Lancement : vérification toutes les 30 secondes
