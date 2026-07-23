@@ -57,7 +57,8 @@ const protocols = [
         positionManagerAbi: require("./abis/UniswapV3PositionManager.json"),
         poolAbi: require("./abis/UniswapV3Pool.json"),
         pools: [
-            "0x467364bd2a633208b4534f5b7ec11d24604546e4" // KHYPE/UBTC 0.3%
+            "0x467364bd2a633208b4534f5b7ec11d24604546e4", // KHYPE/UBTC 0.3%
+            "0x6ae099fd8695c51f94954f93CA3FcB6C9BDdb2A4"  // UBTC/UETH 0.3%
         ]
     }
 ];
